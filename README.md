@@ -161,21 +161,96 @@ async with sse_client("http://localhost:8080/sse") as (read, write):
 | `audit_log` | Show recent audit log entries |
 | `server_info` | Show server info and tool list |
 
+## Connecting an LLM (Mistral)
+
+The `examples/agent.py` script connects Mistral's API to your MCP server in an agent loop: you type natural language, the LLM decides which tools to call, results feed back, and it repeats until done.
+
+```
+you> "Show me all pods and check system load"
+  → LLM calls: k8s_pods(all_namespaces=true), sys_info()
+  → Results fed back to LLM
+  → LLM: "Here's the overview: 18 pods running across 5 namespaces..."
+```
+
+### Setup
+
+```bash
+# 1. Install dependencies
+pip install -r examples/requirements.txt
+
+# 2. Set your Mistral API key (get one at https://console.mistral.ai/api-keys/)
+export MISTRAL_API_KEY="your-key-here"
+
+# 3. Create SSH tunnel to the server (keep running)
+./examples/tunnel.sh
+# or manually: ssh -L 8080:localhost:8080 worker@192.168.1.107
+```
+
+### Usage
+
+```bash
+# Interactive chat — type natural language requests
+python examples/agent.py
+
+# Single prompt
+python examples/agent.py "Restart the jellyfin deployment in the arr namespace"
+
+# Use a specific model
+python examples/agent.py --model mistral-large-latest
+python examples/agent.py --model mistral-small-latest   # faster/cheaper
+
+# Direct LAN access (if you've exposed the port)
+python examples/agent.py --url http://192.168.1.107:8080/sse
+```
+
+### Example prompts
+
+| Prompt | What the LLM will do |
+|---|---|
+| "Show me all pods and their status" | Calls `k8s_pods(all_namespaces=true)` |
+| "Is everything healthy?" | Calls `k8s_nodes`, `k8s_pods`, `k8s_events`, `sys_info` |
+| "Restart jellyfin" | Calls `k8s_restart(deployment=jellyfin, namespace=arr)` |
+| "Check disk space and system load" | Calls `sys_disk`, `sys_info` |
+| "Are there any system updates?" | Calls `sys_updates` |
+| "Show me the last 50 log lines of the qbittorrent pod" | Calls `k8s_logs(pod=qbittorrent-xxx, namespace=arr, tail=50)` |
+| "Read the microk8s config" | Calls `file_read(path=/var/snap/microk8s/current/...)` |
+
+### Other MCP clients
+
+Any MCP-compatible client can connect to `http://localhost:8080/sse` (after SSH tunnel):
+
+- **Claude Desktop** — add to `claude_desktop_config.json`:
+  ```json
+  {
+    "mcpServers": {
+      "jarvis": {
+        "url": "http://localhost:8080/sse"
+      }
+    }
+  }
+  ```
+- **Cursor IDE** — Settings → MCP → add SSE server URL
+- **Continue.dev** — `.continue/config.json` MCP servers section
+- **Custom apps** — use the `mcp` Python SDK (see `examples/client_example.py`)
+
 ## Project Structure
 
 ```
 jarvis-mcp/
-├── README.md                  # This file
-├── requirements.txt           # Python dependencies (mcp>=1.10,<2.0)
+├── README.md                       # This file
+├── requirements.txt                # Server dependencies (mcp>=1.10,<2.0)
 ├── .gitignore
 ├── server/
-│   └── server.py              # The MCP server (40 tools, ~620 lines)
+│   └── server.py                   # The MCP server (40 tools, ~620 lines)
 ├── deploy/
-│   ├── deploy.sh              # Automated deployment script
-│   ├── jarvis-mcp.service     # systemd service unit
-│   └── jarvis-mcp.sudoers     # sudo permissions for the MCP user
+│   ├── deploy.sh                   # Automated deployment script
+│   ├── jarvis-mcp.service          # systemd service unit
+│   └── jarvis-mcp.sudoers          # sudo permissions for the MCP user
 └── examples/
-    └── client_example.py      # Example MCP client with demos
+    ├── agent.py                    # 🤖 Mistral LLM agent (chat with your server!)
+    ├── client_example.py           # Basic MCP client with demos
+    ├── tunnel.sh                   # SSH tunnel helper
+    └── requirements.txt            # Agent dependencies (mcp + mistralai)
 ```
 
 ## Security Model
