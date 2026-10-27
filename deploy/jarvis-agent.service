@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis Agent Service (AI Chat for MCP Server)
+After=network.target jarvis-mcp.service
+Requires=jarvis-mcp.service
+
+[Service]
+Type=simple
+User=worker
+Group=worker
+WorkingDirectory=/opt/jarvis-mcp
+ExecStart=/opt/jarvis-mcp/venv/bin/python /opt/jarvis-mcp/agent_service.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/jarvis-mcp/agent.log
+StandardError=append:/var/log/jarvis-mcp/agent.log
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/jarvis-mcp/agent.env
+
+[Install]
+WantedBy=multi-user.target

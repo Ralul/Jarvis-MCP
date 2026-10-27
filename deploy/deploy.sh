@@ -90,50 +90,110 @@ info "Adding $TARGET_USER to microk8s group..."
 usermod -a -G microk8s "$TARGET_USER"
 ok "User added to microk8s group (re-login required for group to take effect)."
 
-# ── Step 7: Enable and start the service ───────────────────────────────────
+# ── Step 7: Enable and start the MCP server ────────────────────────────────
 info "Starting ${SERVICE_NAME} service..."
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 sleep 3
 
-# ── Step 8: Verify ─────────────────────────────────────────────────────────
-info "Verifying installation..."
+# ── Step 8: Install Agent Service (AI Chat — no SSH tunnel needed) ──────────
+info "Installing Agent Service..."
+AGENT_SERVICE="jarvis-agent"
 
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    ok "Service is running."
-else
-    error "Service failed to start. Check logs: sudo journalctl -u ${SERVICE_NAME} -n 30"
+# Copy agent service code
+cp "$SCRIPT_DIR/../server/agent_service.py" "$INSTALL_DIR/agent_service.py"
+chown "$TARGET_USER:$TARGET_USER" "$INSTALL_DIR/agent_service.py"
+
+# Install additional Python dependencies for the agent (FastAPI, uvicorn, mistralai)
+sudo -u "$TARGET_USER" "$INSTALL_DIR/venv/bin/pip" install --quiet fastapi uvicorn mistralai
+
+# Install agent systemd service
+cp "$SCRIPT_DIR/jarvis-agent.service" "/etc/systemd/system/${AGENT_SERVICE}.service"
+
+# Create env file template for the agent (user fills in MISTRAL_API_KEY)
+if [ ! -f "$INSTALL_DIR/agent.env" ]; then
+    cat > "$INSTALL_DIR/agent.env" << 'ENVEOF'
+# Jarvis Agent Configuration
+# Get your API key at: https://console.mistral.ai/api-keys/
+MISTRAL_API_KEY=your-mistral-api-key-here
+AGENT_MODEL=mistral-large-latest
+# AGENT_API_KEY=optional-bearer-token-for-chat-api
+# MCP_URL=http://127.0.0.1:8080/sse
+# AGENT_PORT=8081
+ENVEOF
+    chown "$TARGET_USER:$TARGET_USER" "$INSTALL_DIR/agent.env"
+    chmod 600 "$INSTALL_DIR/agent.env"
+    warn "Created $INSTALL_DIR/agent.env — edit it to set your MISTRAL_API_KEY!"
 fi
 
-HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/sse --max-time 5 || echo "000")
-if [ "$HTTP_CODE" = "200" ]; then
-    ok "SSE endpoint responding on http://127.0.0.1:8080/sse (HTTP $HTTP_CODE)"
+systemctl daemon-reload
+systemctl enable "$AGENT_SERVICE"
+systemctl restart "$AGENT_SERVICE"
+sleep 3
+
+# ── Step 9: Verify everything ──────────────────────────────────────────────
+info "Verifying installation..."
+
+# Check MCP server
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    ok "MCP server is running."
 else
-    warn "SSE endpoint returned HTTP $HTTP_CODE — server may still be starting up."
+    error "MCP server failed to start. Check: sudo journalctl -u ${SERVICE_NAME} -n 30"
+fi
+
+MCP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/sse --max-time 5 || echo "000")
+if [ "$MCP_CODE" = "200" ]; then
+    ok "MCP SSE endpoint: http://127.0.0.1:8080/sse (HTTP $MCP_CODE)"
+else
+    warn "MCP SSE endpoint returned HTTP $MCP_CODE — may still be starting."
+fi
+
+# Check Agent service
+if systemctl is-active --quiet "$AGENT_SERVICE"; then
+    ok "Agent service is running."
+else
+    warn "Agent service failed to start (likely missing MISTRAL_API_KEY). Check: sudo journalctl -u ${AGENT_SERVICE} -n 30"
+fi
+
+AGENT_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/health --max-time 5 || echo "000")
+if [ "$AGENT_CODE" = "200" ]; then
+    ok "Agent health endpoint: http://0.0.0.0:8081/health (HTTP $AGENT_CODE)"
+else
+    warn "Agent health endpoint returned HTTP $AGENT_CODE."
 fi
 
 # ── Done ───────────────────────────────────────────────────────────────────
+SERVER_IP=$(hostname -I | awk '{print $1}')
 echo ""
 echo "======================================================================"
-echo "  Jarvis MCP Server — Installation Complete"
+echo "  Jarvis MCP Server + Agent — Installation Complete"
 echo "======================================================================"
 echo ""
-echo "  Server code:   $INSTALL_DIR/server.py"
-echo "  Service:       $SERVICE_NAME (enabled, running)"
-echo "  SSE endpoint:  http://127.0.0.1:8080/sse"
-echo "  Audit log:     $LOG_DIR/audit.log"
-echo "  Server log:    $LOG_DIR/server.log"
+echo "  MCP Server:"
+echo "    Service:     $SERVICE_NAME (enabled, running)"
+echo "    SSE:         http://127.0.0.1:8080/sse (localhost only)"
 echo ""
-echo "  To connect from your machine, create an SSH tunnel:"
-echo "    ssh -L 8080:localhost:8080 ${TARGET_USER}@<server-ip>"
+echo "  AI Agent (no SSH tunnel needed!):"
+echo "    Service:     $AGENT_SERVICE (enabled, running)"
+echo "    Web UI:      http://${SERVER_IP}:8081/"
+echo "    Chat API:    http://${SERVER_IP}:8081/chat"
+echo "    Health:      http://${SERVER_IP}:8081/health"
 echo ""
-echo "  Then point your MCP client at:"
-echo "    http://localhost:8080/sse"
+echo "  ⚠️  IMPORTANT: Set your Mistral API key:"
+echo "    sudo nano $INSTALL_DIR/agent.env"
+echo "    → Set MISTRAL_API_KEY=your-key-here"
+echo "    → sudo systemctl restart $AGENT_SERVICE"
 echo ""
-echo "  Useful commands:"
-echo "    sudo systemctl status $SERVICE_NAME     # check status"
-echo "    sudo systemctl restart $SERVICE_NAME    # restart"
-echo "    sudo journalctl -u $SERVICE_NAME -f     # follow logs"
-echo "    tail -f $LOG_DIR/audit.log              # audit trail"
+echo "  Then open in your browser:"
+echo "    http://${SERVER_IP}:8081/"
+echo ""
+echo "  Logs:"
+echo "    MCP:    $LOG_DIR/server.log"
+echo "    Agent:  $LOG_DIR/agent.log"
+echo "    Audit:  $LOG_DIR/audit.log"
+echo ""
+echo "  Service management:"
+echo "    sudo systemctl status $SERVICE_NAME $AGENT_SERVICE"
+echo "    sudo systemctl restart $SERVICE_NAME $AGENT_SERVICE"
 echo ""
 echo "======================================================================"

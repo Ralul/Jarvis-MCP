@@ -2,46 +2,38 @@
 
 An MCP (Model Context Protocol) server that runs natively on an Ubuntu server and exposes **40 tools** for an LLM to manage both the **host system** and a **MicroK8s cluster**.
 
+Two services run on the server — **no SSH tunnel needed**:
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Ubuntu Server (jarvis)                 │
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │           Jarvis Admin MCP Server                   │  │
-│  │           (systemd service, port 8080)              │  │
-│  │                                                    │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │  │
-│  │  │  Cluster    │  │   System    │  │   File    │  │  │
-│  │  │  Tools (19) │  │  Tools (15) │  │  Tools (4)│  │  │
-│  │  │             │  │             │  │           │  │  │
-│  │  │ k8s_pods    │  │ sys_info    │  │ file_read │  │  │
-│  │  │ k8s_apply   │  │ sys_services│  │ file_write│  │  │
-│  │  │ k8s_delete  │  │ sys_reboot  │  │ file_list │  │  │
-│  │  │ k8s_scale   │  │ sys_upgrade │  │ file_find │  │  │
-│  │  │ k8s_restart │  │ sys_logs    │  │           │  │  │
-│  │  │ k8s_logs    │  │ ...         │  │           │  │  │
-│  │  │ ...         │  │             │  │           │  │  │
-│  │  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │  │
-│  │         │                │               │         │  │
-│  │         ▼                ▼               ▼         │  │
-│  │    ┌─────────┐    ┌──────────┐    ┌──────────┐    │  │
-│  │    │ MicroK8s │    │ systemd  │    │ Filesystem│    │  │
-│  │    │ kubectl  │    │ apt/snap │    │ /etc /opt │    │  │
-│  │    │ (cluster)│    │ (host)   │    │ /home ... │    │  │
-│  │    └─────────┘    └──────────┘    └──────────┘    │  │
-│  └────────────────────────────────────────────────────┘  │
-│                          ▲                               │
-│                          │ SSE (127.0.0.1:8080)         │
-│                     ┌────┴────┐                          │
-│                     │   LLM   │  Mistral API, Claude,    │
-│                     │ (remote)│  or any MCP client        │
-│                     └─────────┘                          │
-└──────────────────────────────────────────────────────────┘
-         ▲
-         │ SSH tunnel: ssh -L 8080:localhost:8080 worker@jarvis
-    ┌────┴────┐
-    │ Your PC  │
-    └─────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    Ubuntu Server (jarvis)                         │
+│                                                                  │
+│  ┌─────────────────────────┐    ┌─────────────────────────────┐  │
+│  │  MCP Server (:8080)      │    │  Agent Service (:8081)       │  │
+│  │  127.0.0.1 only          │◄───│  0.0.0.0 (LAN accessible)    │  │
+│  │                          │    │                             │  │
+│  │  40 tools:               │    │  - Web chat UI              │  │
+│  │  • Cluster (kubectl)     │    │  - REST API (/chat)         │  │
+│  │  • System (systemd, apt) │    │  - Mistral LLM agent loop   │  │
+│  │  • Files (read/write)    │    │  - Conversation history     │  │
+│  │  • Audit logging         │    │  - Auto-starts on boot      │  │
+│  └─────────────────────────┘    └────────────┬────────────────┘  │
+│                                              │                   │
+│                                         ┌────┴────┐              │
+│                                         │  Mistral │              │
+│                                         │   API    │              │
+│                                         │ (cloud)  │              │
+│                                         └────┬────┘              │
+│                                              │                   │
+│  ┌───────────────────────────────────────────┘                   │
+│  │  Your browser: http://192.168.1.107:8081/                     │
+│  │  curl: curl -X POST http://192.168.1.107:8081/chat \          │
+│  │        -H 'Content-Type: application/json' \                  │
+│  │        -d '{"message": "Show all pods"}'                      │
+│  └──────────────────────────────────────────────────────────────┘
+│                                                                  │
+│  Both services: systemd, enabled, auto-restart on failure        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -66,37 +58,39 @@ git clone <repo-url> && cd jarvis-mcp
 sudo bash deploy/deploy.sh
 ```
 
-The script will:
-- Create `/opt/jarvis-mcp/` and `/var/log/jarvis-mcp/`
-- Install the server code and Python dependencies
-- Configure systemd service and sudo permissions
-- Add the user to the `microk8s` group
-- Start the service
+The script installs **both services**:
+- **MCP Server** on `127.0.0.1:8080` — the tool server (localhost only, secure)
+- **Agent Service** on `0.0.0.0:8081` — the AI chat (LAN accessible, no tunnel needed)
 
-### 2. Connect from your machine
+### 2. Set your Mistral API key
 
 ```bash
-# Create an SSH tunnel
-ssh -L 8080:localhost:8080 worker@192.168.1.107
+sudo nano /opt/jarvis-mcp/agent.env
+# Set: MISTRAL_API_KEY=your-key-here
+sudo systemctl restart jarvis-agent
 ```
 
-### 3. Use with an LLM
+### 3. Open the chat UI in your browser
 
-```python
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+```
+http://192.168.1.107:8081/
+```
 
-async with sse_client("http://localhost:8080/sse") as (read, write):
-    async with ClientSession(read, write) as session:
-        await session.initialize()
+No SSH tunnel needed. Type natural language and the AI agent manages your server.
 
-        # Let the LLM manage your cluster
-        result = await session.call_tool("k8s_pods", {"all_namespaces": True})
-        result = await session.call_tool("sys_info", {})
-        result = await session.call_tool("k8s_restart", {
-            "deployment": "jellyfin",
-            "namespace": "arr"
-        })
+### 4. Or use the REST API
+
+```bash
+curl -X POST http://192.168.1.107:8081/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "Show me all pods and check system load"}'
+```
+
+### 5. Or connect any MCP client (with SSH tunnel)
+
+```bash
+ssh -L 8080:localhost:8080 worker@192.168.1.107
+# Then point your MCP client at: http://localhost:8080/sse
 ```
 
 ## All Tools
@@ -163,47 +157,74 @@ async with sse_client("http://localhost:8080/sse") as (read, write):
 
 ## Connecting an LLM (Mistral)
 
-The `examples/agent.py` script connects Mistral's API to your MCP server in an agent loop: you type natural language, the LLM decides which tools to call, results feed back, and it repeats until done.
+### Option A: Agent Service on the server (no SSH tunnel — recommended)
+
+The `server/agent_service.py` runs **on the server itself** as a systemd service. It connects to the MCP server on `localhost` directly and exposes a web chat UI on the LAN.
 
 ```
-you> "Show me all pods and check system load"
-  → LLM calls: k8s_pods(all_namespaces=true), sys_info()
-  → Results fed back to LLM
-  → LLM: "Here's the overview: 18 pods running across 5 namespaces..."
+Browser ──► http://192.168.1.107:8081/ ──► Agent Service ──► MCP Server (localhost:8080)
+                                                    └──► Mistral API (cloud)
 ```
 
-### Setup
+**Setup:**
+
+```bash
+# 1. Set your Mistral API key
+sudo nano /opt/jarvis-mcp/agent.env
+# Set: MISTRAL_API_KEY=your-key-here
+sudo systemctl restart jarvis-agent
+
+# 2. Open in your browser
+http://192.168.1.107:8081/
+```
+
+**REST API:**
+
+```bash
+# Send a message
+curl -X POST http://192.168.1.107:8081/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "Show me all pods and check system load"}'
+
+# Response:
+# {"response": "Here's the overview...", "session_id": "...", "tool_calls": ["k8s_pods", "sys_info"]}
+
+# Health check
+curl http://192.168.1.107:8081/health
+
+# List tools
+curl http://192.168.1.107:8081/tools
+
+# Reset a conversation
+curl -X POST "http://192.168.1.107:8081/reset?session_id=xxx"
+```
+
+**Features:**
+- Web chat UI (dark theme, markdown rendering, tool call badges)
+- Conversation history (per session, stored in memory)
+- Persistent MCP connection (established on startup)
+- Optional API key auth (set `AGENT_API_KEY` in `agent.env`)
+- Auto-starts on boot, auto-restarts on failure
+
+### Option B: Agent script on your machine (needs SSH tunnel)
+
+The `examples/agent.py` script connects Mistral's API to your MCP server from your local machine:
 
 ```bash
 # 1. Install dependencies
 pip install -r examples/requirements.txt
 
-# 2. Set your Mistral API key (get one at https://console.mistral.ai/api-keys/)
+# 2. Set your Mistral API key
 export MISTRAL_API_KEY="your-key-here"
 
-# 3. Create SSH tunnel to the server (keep running)
+# 3. Create SSH tunnel (keep running)
 ./examples/tunnel.sh
-# or manually: ssh -L 8080:localhost:8080 worker@192.168.1.107
-```
 
-### Usage
-
-```bash
-# Interactive chat — type natural language requests
+# 4. Start chatting
 python examples/agent.py
-
-# Single prompt
-python examples/agent.py "Restart the jellyfin deployment in the arr namespace"
-
-# Use a specific model
-python examples/agent.py --model mistral-large-latest
-python examples/agent.py --model mistral-small-latest   # faster/cheaper
-
-# Direct LAN access (if you've exposed the port)
-python examples/agent.py --url http://192.168.1.107:8080/sse
 ```
 
-### Example prompts
+**Example prompts:**
 
 | Prompt | What the LLM will do |
 |---|---|
@@ -212,10 +233,9 @@ python examples/agent.py --url http://192.168.1.107:8080/sse
 | "Restart jellyfin" | Calls `k8s_restart(deployment=jellyfin, namespace=arr)` |
 | "Check disk space and system load" | Calls `sys_disk`, `sys_info` |
 | "Are there any system updates?" | Calls `sys_updates` |
-| "Show me the last 50 log lines of the qbittorrent pod" | Calls `k8s_logs(pod=qbittorrent-xxx, namespace=arr, tail=50)` |
-| "Read the microk8s config" | Calls `file_read(path=/var/snap/microk8s/current/...)` |
+| "Show me the last 50 log lines of qbittorrent" | Calls `k8s_logs(pod=qbittorrent-xxx, namespace=arr, tail=50)` |
 
-### Other MCP clients
+### Option C: Other MCP clients (needs SSH tunnel)
 
 Any MCP-compatible client can connect to `http://localhost:8080/sse` (after SSH tunnel):
 
@@ -238,19 +258,21 @@ Any MCP-compatible client can connect to `http://localhost:8080/sse` (after SSH 
 ```
 jarvis-mcp/
 ├── README.md                       # This file
-├── requirements.txt                # Server dependencies (mcp>=1.10,<2.0)
+├── requirements.txt                # Server + agent dependencies
 ├── .gitignore
 ├── server/
-│   └── server.py                   # The MCP server (40 tools, ~620 lines)
+│   ├── server.py                   # MCP server (40 tools, ~620 lines)
+│   └── agent_service.py            # AI agent web service (FastAPI, chat UI)
 ├── deploy/
-│   ├── deploy.sh                   # Automated deployment script
-│   ├── jarvis-mcp.service          # systemd service unit
+│   ├── deploy.sh                   # Automated deployment (both services)
+│   ├── jarvis-mcp.service          # MCP server systemd unit
+│   ├── jarvis-agent.service        # Agent service systemd unit
 │   └── jarvis-mcp.sudoers          # sudo permissions for the MCP user
 └── examples/
-    ├── agent.py                    # 🤖 Mistral LLM agent (chat with your server!)
+    ├── agent.py                    # CLI agent (Mistral + MCP, needs SSH tunnel)
     ├── client_example.py           # Basic MCP client with demos
     ├── tunnel.sh                   # SSH tunnel helper
-    └── requirements.txt            # Agent dependencies (mcp + mistralai)
+    └── requirements.txt            # CLI agent dependencies
 ```
 
 ## Security Model
@@ -269,12 +291,26 @@ jarvis-mcp/
 ## Service Management
 
 ```bash
-sudo systemctl status jarvis-mcp     # Check status
-sudo systemctl restart jarvis-mcp    # Restart
-sudo systemctl stop jarvis-mcp       # Stop
-sudo journalctl -u jarvis-mcp -f     # Follow logs
-tail -f /var/log/jarvis-mcp/audit.log  # Audit trail
-```
+# Both services
+sudo systemctl status jarvis-mcp jarvis-agent
+sudo systemctl restart jarvis-mcp jarvis-agent
+
+# MCP Server (port 8080, localhost only)
+sudo systemctl status jarvis-mcp
+sudo journalctl -u jarvis-mcp -f
+
+# Agent Service (port 8081, LAN accessible)
+sudo systemctl status jarvis-agent
+sudo journalctl -u jarvis-agent -f
+
+# Logs
+tail -f /var/log/jarvis-mcp/server.log    # MCP server
+tail -f /var/log/jarvis-mcp/agent.log     # Agent service
+tail -f /var/log/jarvis-mcp/audit.log     # Audit trail (every tool call)
+
+# Agent configuration
+sudo nano /opt/jarvis-mcp/agent.env       # Edit API key, model, etc.
+sudo systemctl restart jarvis-agent       # Apply changes
 
 ## Requirements
 
