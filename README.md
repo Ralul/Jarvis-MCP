@@ -2,38 +2,49 @@
 
 An MCP (Model Context Protocol) server that runs natively on an Ubuntu server and exposes **40 tools** for an LLM to manage both the **host system** and a **MicroK8s cluster**.
 
-Two services run on the server — **no SSH tunnel needed**:
+Remote access is handled by **Pangolin** (host-level Newt client) — no SSH tunnel needed, and access survives Kubernetes outages.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Ubuntu Server (jarvis)                         │
-│                                                                  │
-│  ┌─────────────────────────┐    ┌─────────────────────────────┐  │
-│  │  MCP Server (:8080)      │    │  Agent Service (:8081)       │  │
-│  │  127.0.0.1 only          │◄───│  0.0.0.0 (LAN accessible)    │  │
-│  │                          │    │                             │  │
-│  │  40 tools:               │    │  - Web chat UI              │  │
-│  │  • Cluster (kubectl)     │    │  - REST API (/chat)         │  │
-│  │  • System (systemd, apt) │    │  - Mistral LLM agent loop   │  │
-│  │  • Files (read/write)    │    │  - Conversation history     │  │
-│  │  • Audit logging         │    │  - Auto-starts on boot      │  │
-│  └─────────────────────────┘    └────────────┬────────────────┘  │
-│                                              │                   │
-│                                         ┌────┴────┐              │
-│                                         │  Mistral │              │
-│                                         │   API    │              │
-│                                         │ (cloud)  │              │
-│                                         └────┬────┘              │
-│                                              │                   │
-│  ┌───────────────────────────────────────────┘                   │
-│  │  Your browser: http://192.168.1.107:8081/                     │
-│  │  curl: curl -X POST http://192.168.1.107:8081/chat \          │
-│  │        -H 'Content-Type: application/json' \                  │
-│  │        -d '{"message": "Show all pods"}'                      │
-│  └──────────────────────────────────────────────────────────────┘
-│                                                                  │
-│  Both services: systemd, enabled, auto-restart on failure        │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                      Ubuntu Server (jarvis)                           │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │  MCP Server — systemd service                                 │    │
+│  │  127.0.0.1:8080 (SSE transport)                               │    │
+│  │                                                               │    │
+│  │  40 tools:                                                    │    │
+│  │  • Cluster (19): kubectl, pods, deployments, apply, scale...  │    │
+│  │  • System (15):  systemd, apt, snap, disk, network, reboot... │    │
+│  │  • Files (4):    read, write, list, find                      │    │
+│  │  • Meta (2):     audit_log, server_info                       │    │
+│  └──────────────────────────┬───────────────────────────────────┘    │
+│                             │                                        │
+│  ┌──────────────────────────▼───────────────────────────────────┐    │
+│  │  Newt (Pangolin host client) — systemd service                │    │
+│  │  Runs on host OS, independent of Kubernetes                   │    │
+│  │                                                               │    │
+│  │  Proxies:                                                     │    │
+│  │  • https://mcp.yourdomain.com  → 127.0.0.1:8080 (MCP/SSE)     │    │
+│  │  • tcp://pangolin:21022       → 127.0.0.1:22    (SSH)         │    │
+│  └──────────────────────────┬───────────────────────────────────┘    │
+│                             │                                        │
+│                    ┌────────┴────────┐                               │
+│                    │  Pangolin Cloud  │                               │
+│                    │  app.pangolin.net│                               │
+│                    └────────┬────────┘                               │
+│                             │                                        │
+│  ┌──────────────────────────▼───────────────────────────────────┐    │
+│  │  Your machine / LLM client                                    │    │
+│  │                                                               │    │
+│  │  MCP client → https://mcp.yourdomain.com/sse                  │    │
+│  │  SSH        → ssh -p 21022 worker@pangolin-server             │    │
+│  │  LLM agent  → connects to MCP via domain, no tunnel needed    │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│                                                                      │
+│  Kubernetes cluster (separate — can crash without affecting access)  │
+│  • MicroK8s (arr stack, portainer, traefik, etc.)                   │
+│  • Newt pods in k8s (for arr services via Pangolin)                  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -41,56 +52,80 @@ Two services run on the server — **no SSH tunnel needed**:
 - **40 tools** across 4 categories: Cluster (19), System (15), Files (4), Meta (2)
 - **Safety guardrails**: destructive operations require `confirm=true`
 - **Dry-run by default** for `k8s_apply`
-- **Full audit trail**: every tool call logged with timestamp, args, and result
+- **Full audit trail**: every tool call logged
 - **Path restrictions**: file tools limited to safe directories
-- **Localhost-only**: binds to `127.0.0.1`, use SSH tunnel for remote access
-- **systemd service**: auto-starts on boot, auto-restarts on failure
+- **Remote access via Pangolin**: MCP server accessible via HTTPS domain, SSH via TCP tunnel — both independent of Kubernetes
 
 ## Quick Start
 
-### 1. Deploy to your server
+### 1. Deploy the MCP server
 
 ```bash
-# Clone this repo on the server (or copy the files)
 git clone <repo-url> && cd jarvis-mcp
-
-# Run the deployment script (requires sudo)
 sudo bash deploy/deploy.sh
 ```
 
-The script installs **both services**:
-- **MCP Server** on `127.0.0.1:8080` — the tool server (localhost only, secure)
-- **Agent Service** on `0.0.0.0:8081` — the AI chat (LAN accessible, no tunnel needed)
+This installs:
+- MCP server at `/opt/jarvis-mcp/server.py`
+- Python venv with `mcp>=1.10,<2.0`
+- systemd service `jarvis-mcp` (enabled, auto-starts on boot)
+- Sudo permissions for safe commands
+- Audit logging to `/var/log/jarvis-mcp/audit.log`
 
-### 2. Set your Mistral API key
-
-```bash
-sudo nano /opt/jarvis-mcp/agent.env
-# Set: MISTRAL_API_KEY=your-key-here
-sudo systemctl restart jarvis-agent
-```
-
-### 3. Open the chat UI in your browser
-
-```
-http://192.168.1.107:8081/
-```
-
-No SSH tunnel needed. Type natural language and the AI agent manages your server.
-
-### 4. Or use the REST API
+### 2. Set up host-level Newt (Pangolin client)
 
 ```bash
-curl -X POST http://192.168.1.107:8081/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message": "Show me all pods and check system load"}'
+sudo bash deploy/setup-newt-host.sh
 ```
 
-### 5. Or connect any MCP client (with SSH tunnel)
+This installs:
+- Newt binary at `/opt/newt-host/newt`
+- systemd service `newt-host` (enabled, auto-starts on boot)
+- Env file template at `/opt/newt-host/newt.env`
 
+### 3. Configure Pangolin
+
+**a) Create a new site in Pangolin** at https://app.pangolin.net:
+- Name: `jarvis-host`
+- Generate Newt credentials (NEWT_ID + NEWT_SECRET)
+
+**b) Fill in credentials on the server:**
 ```bash
-ssh -L 8080:localhost:8080 worker@192.168.1.107
-# Then point your MCP client at: http://localhost:8080/sse
+sudo nano /opt/newt-host/newt.env
+# Set NEWT_ID and NEWT_SECRET from Pangolin
+sudo systemctl start newt-host
+```
+
+**c) Add resources in Pangolin dashboard (jarvis-host site):**
+
+| Type | Name | Domain / Port | Target |
+|---|---|---|---|
+| HTTP | `jarvis-mcp` | `mcp.yourdomain.com` | `127.0.0.1:8080` |
+| TCP | `jarvis-ssh` | (auto-assigned port) | `127.0.0.1:22` |
+
+### 4. Connect
+
+**MCP server via domain:**
+```
+https://mcp.yourdomain.com/sse
+```
+Any MCP-compatible client or LLM agent can connect here.
+
+**SSH via Pangolin:**
+```bash
+ssh -p <assigned-port> worker@<pangolin-server>
+```
+
+**LLM agent example:**
+```python
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+async with sse_client("https://mcp.yourdomain.com/sse") as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.call_tool("k8s_pods", {"all_namespaces": True})
+        result = await session.call_tool("sys_info", {})
 ```
 
 ## All Tools
@@ -155,169 +190,59 @@ ssh -L 8080:localhost:8080 worker@192.168.1.107
 | `audit_log` | Show recent audit log entries |
 | `server_info` | Show server info and tool list |
 
-## Connecting an LLM (Mistral)
-
-### Option A: Agent Service on the server (no SSH tunnel — recommended)
-
-The `server/agent_service.py` runs **on the server itself** as a systemd service. It connects to the MCP server on `localhost` directly and exposes a web chat UI on the LAN.
-
-```
-Browser ──► http://192.168.1.107:8081/ ──► Agent Service ──► MCP Server (localhost:8080)
-                                                    └──► Mistral API (cloud)
-```
-
-**Setup:**
-
-```bash
-# 1. Set your Mistral API key
-sudo nano /opt/jarvis-mcp/agent.env
-# Set: MISTRAL_API_KEY=your-key-here
-sudo systemctl restart jarvis-agent
-
-# 2. Open in your browser
-http://192.168.1.107:8081/
-```
-
-**REST API:**
-
-```bash
-# Send a message
-curl -X POST http://192.168.1.107:8081/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message": "Show me all pods and check system load"}'
-
-# Response:
-# {"response": "Here's the overview...", "session_id": "...", "tool_calls": ["k8s_pods", "sys_info"]}
-
-# Health check
-curl http://192.168.1.107:8081/health
-
-# List tools
-curl http://192.168.1.107:8081/tools
-
-# Reset a conversation
-curl -X POST "http://192.168.1.107:8081/reset?session_id=xxx"
-```
-
-**Features:**
-- Web chat UI (dark theme, markdown rendering, tool call badges)
-- Conversation history (per session, stored in memory)
-- Persistent MCP connection (established on startup)
-- Optional API key auth (set `AGENT_API_KEY` in `agent.env`)
-- Auto-starts on boot, auto-restarts on failure
-
-### Option B: Agent script on your machine (needs SSH tunnel)
-
-The `examples/agent.py` script connects Mistral's API to your MCP server from your local machine:
-
-```bash
-# 1. Install dependencies
-pip install -r examples/requirements.txt
-
-# 2. Set your Mistral API key
-export MISTRAL_API_KEY="your-key-here"
-
-# 3. Create SSH tunnel (keep running)
-./examples/tunnel.sh
-
-# 4. Start chatting
-python examples/agent.py
-```
-
-**Example prompts:**
-
-| Prompt | What the LLM will do |
-|---|---|
-| "Show me all pods and their status" | Calls `k8s_pods(all_namespaces=true)` |
-| "Is everything healthy?" | Calls `k8s_nodes`, `k8s_pods`, `k8s_events`, `sys_info` |
-| "Restart jellyfin" | Calls `k8s_restart(deployment=jellyfin, namespace=arr)` |
-| "Check disk space and system load" | Calls `sys_disk`, `sys_info` |
-| "Are there any system updates?" | Calls `sys_updates` |
-| "Show me the last 50 log lines of qbittorrent" | Calls `k8s_logs(pod=qbittorrent-xxx, namespace=arr, tail=50)` |
-
-### Option C: Other MCP clients (needs SSH tunnel)
-
-Any MCP-compatible client can connect to `http://localhost:8080/sse` (after SSH tunnel):
-
-- **Claude Desktop** — add to `claude_desktop_config.json`:
-  ```json
-  {
-    "mcpServers": {
-      "jarvis": {
-        "url": "http://localhost:8080/sse"
-      }
-    }
-  }
-  ```
-- **Cursor IDE** — Settings → MCP → add SSE server URL
-- **Continue.dev** — `.continue/config.json` MCP servers section
-- **Custom apps** — use the `mcp` Python SDK (see `examples/client_example.py`)
-
 ## Project Structure
 
 ```
 jarvis-mcp/
 ├── README.md                       # This file
-├── requirements.txt                # Server + agent dependencies
+├── requirements.txt                # mcp>=1.10,<2.0
 ├── .gitignore
 ├── server/
-│   ├── server.py                   # MCP server (40 tools, ~620 lines)
-│   └── agent_service.py            # AI agent web service (FastAPI, chat UI)
-├── deploy/
-│   ├── deploy.sh                   # Automated deployment (both services)
-│   ├── jarvis-mcp.service          # MCP server systemd unit
-│   ├── jarvis-agent.service        # Agent service systemd unit
-│   └── jarvis-mcp.sudoers          # sudo permissions for the MCP user
-└── examples/
-    ├── agent.py                    # CLI agent (Mistral + MCP, needs SSH tunnel)
-    ├── client_example.py           # Basic MCP client with demos
-    ├── tunnel.sh                   # SSH tunnel helper
-    └── requirements.txt            # CLI agent dependencies
+│   └── server.py                   # MCP server (40 tools, ~620 lines)
+└── deploy/
+    ├── deploy.sh                   # MCP server deployment
+    ├── setup-newt-host.sh          # Host-level Newt (Pangolin) setup
+    ├── jarvis-mcp.service          # MCP server systemd unit
+    ├── jarvis-mcp.sudoers          # Sudo permissions
+    ├── newt-host.service           # Host Newt systemd unit
+    └── newt-host.env.example       # Newt credentials template
 ```
 
 ## Security Model
 
 | Layer | Protection |
 |---|---|
-| **Network** | Binds to `127.0.0.1:8080` only — no direct LAN exposure |
-| **Access** | SSH tunnel required for remote access |
-| **Confirmation** | Destructive ops require `confirm=true` parameter |
+| **Network** | MCP server binds to `127.0.0.1:8080` — not directly exposed |
+| **Remote access** | Via Pangolin (HTTPS domain with TLS, or TCP tunnel) |
+| **Host independence** | Newt runs on host OS — survives Kubernetes outages |
+| **Confirmation** | Destructive ops require `confirm=true` |
 | **Dry-run** | `k8s_apply` defaults to `--dry-run=server` |
 | **Path restrictions** | File tools limited to `/etc`, `/opt`, `/home`, `/root`, `/var/snap/microk8s`, `/var/lib`, `/tmp`, `/srv` |
 | **OS permissions** | Server runs as `worker` user — can't read root-only files |
 | **Audit trail** | Every tool call logged to `/var/log/jarvis-mcp/audit.log` |
-| **Sudo allowlist** | Only specific commands allowed passwordless via sudoers |
+| **Sudo allowlist** | Only specific commands allowed passwordless |
 
 ## Service Management
 
 ```bash
-# Both services
-sudo systemctl status jarvis-mcp jarvis-agent
-sudo systemctl restart jarvis-mcp jarvis-agent
-
-# MCP Server (port 8080, localhost only)
+# MCP Server
 sudo systemctl status jarvis-mcp
+sudo systemctl restart jarvis-mcp
 sudo journalctl -u jarvis-mcp -f
+tail -f /var/log/jarvis-mcp/audit.log
 
-# Agent Service (port 8081, LAN accessible)
-sudo systemctl status jarvis-agent
-sudo journalctl -u jarvis-agent -f
-
-# Logs
-tail -f /var/log/jarvis-mcp/server.log    # MCP server
-tail -f /var/log/jarvis-mcp/agent.log     # Agent service
-tail -f /var/log/jarvis-mcp/audit.log     # Audit trail (every tool call)
-
-# Agent configuration
-sudo nano /opt/jarvis-mcp/agent.env       # Edit API key, model, etc.
-sudo systemctl restart jarvis-agent       # Apply changes
+# Host Newt (Pangolin client)
+sudo systemctl status newt-host
+sudo systemctl restart newt-host
+tail -f /var/log/newt-host.log
+```
 
 ## Requirements
 
 - Ubuntu 22.04+ (tested on 26.04)
 - MicroK8s installed (`sudo snap install microk8s --classic`)
-- Python 3.10+
-- `python3-venv` package
+- Python 3.10+ with `python3-venv`
+- Pangolin account (https://app.pangolin.net) for remote access
 
 ## License
 
