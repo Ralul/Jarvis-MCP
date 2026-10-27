@@ -1,0 +1,18 @@
+[Unit]
+Description=Newt (Pangolin Host Client) - SSH tunnel independent of Kubernetes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/newt-host
+EnvironmentFile=/opt/newt-host/newt.env
+ExecStart=/opt/newt-host/newt
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/newt-host.log
+StandardError=append:/var/log/newt-host.log
+
+[Install]
+WantedBy=multi-user.target
