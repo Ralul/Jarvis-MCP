@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # ── Configuration ──────────────────────────────────────────────────
 AUDIT_LOG_DIR  = "/var/log/jarvis-mcp"
@@ -111,8 +112,16 @@ def check_safe_path(path: str) -> bool:
 
 
 # ── MCP Server Instance ────────────────────────────────────────────
-mcp = FastMCP("jarvis-admin", host=HOST, port=PORT)
-
+mcp = FastMCP(
+    "jarvis-admin",
+    host=HOST,
+    port=PORT,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["mcp.ralul.xyz", "localhost:*", "127.0.0.1:*"],
+        allowed_origins=["https://mcp.ralul.xyz"],
+    ),
+)
 
 # ═══════════════════════════════════════════════════════════════════
 #  KUBERNETES / CLUSTER TOOLS
