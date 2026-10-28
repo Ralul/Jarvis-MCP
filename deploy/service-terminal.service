@@ -1,0 +1,19 @@
+[Unit]
+Description=Service Terminal MCP Server
+After=network.target snap.microk8s.daemon-kubelite.service
+Wants=snap.microk8s.daemon-kubelite.service
+
+[Service]
+Type=simple
+User=worker
+Group=worker
+WorkingDirectory=/opt/service-terminal
+ExecStart=/opt/service-terminal/venv/bin/python /opt/service-terminal/server.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/service-terminal/server.log
+StandardError=append:/var/log/service-terminal/server.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

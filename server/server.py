@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""
-Jarvis Admin MCP Server
-=======================
-Native MCP server for managing the Ubuntu host and MicroK8s cluster.
-Runs as a systemd service, exposes tools via SSE transport on localhost:8080.
 
-Security:
-  - Binds to 127.0.0.1 only (use SSH tunnel for remote access)
-  - All mutating operations require confirm=true
-  - Every action is audit-logged to /var/log/jarvis-mcp/audit.log
-  - File operations restricted to safe paths
-"""
-
-import subprocess
-import json
 import os
+import subprocess
 import logging
 import datetime
 from pathlib import Path
@@ -23,16 +10,16 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-# ── Configuration ──────────────────────────────────────────────────
-AUDIT_LOG_DIR  = "/var/log/jarvis-mcp"
-AUDIT_LOG      = os.path.join(AUDIT_LOG_DIR, "audit.log")
-SERVER_LOG     = os.path.join(AUDIT_LOG_DIR, "server.log")
-KUBECTL        = "/snap/bin/microk8s.kubectl"
-MICROK8S       = "/snap/bin/microk8s"
-HOST           = "127.0.0.1"
-PORT           = 8080
+AUDIT_LOG_DIR = "/var/log/service-terminal"
+AUDIT_LOG = os.path.join(AUDIT_LOG_DIR, "audit.log")
+SERVER_LOG = os.path.join(AUDIT_LOG_DIR, "server.log")
+KUBECTL = "/snap/bin/microk8s.kubectl"
+MICROK8S = "/snap/bin/microk8s"
+HOST = "127.0.0.1"
+PORT = 8080
 
-# Paths the file tools are allowed to touch
+BEARER_TOKEN = os.environ.get("SERVICE_TERMINAL_TOKEN", "")
+
 SAFE_FILE_PREFIXES = [
     "/etc/",
     "/opt/",
@@ -44,7 +31,6 @@ SAFE_FILE_PREFIXES = [
     "/srv/",
 ]
 
-# ── Logging ────────────────────────────────────────────────────────
 os.makedirs(AUDIT_LOG_DIR, exist_ok=True)
 _handlers = [logging.StreamHandler()]
 try:
@@ -56,21 +42,18 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=_handlers,
 )
-logger = logging.getLogger("jarvis-mcp")
+logger = logging.getLogger("service-terminal")
 
 
-# ── Helpers ────────────────────────────────────────────────────────
 def audit(tool: str, args: str, result: str, status: str = "ok") -> None:
-    """Write an audit trail entry for every tool invocation."""
     ts = datetime.datetime.now().isoformat()
     entry = f"{ts} | {tool} | {args} | {status} | {result[:500]}"
     try:
         with open(AUDIT_LOG, "a") as f:
             f.write(entry + "\n")
     except PermissionError:
-        # Fallback: write to a user-writable location
         try:
-            with open(os.path.expanduser("~/jarvis-mcp-audit.log"), "a") as f:
+            with open(os.path.expanduser("~/service-terminal-audit.log"), "a") as f:
                 f.write(entry + "\n")
         except Exception:
             pass
@@ -79,8 +62,15 @@ def audit(tool: str, args: str, result: str, status: str = "ok") -> None:
     logger.info("AUDIT [%s] %s: %s", status, tool, args[:200])
 
 
+def validate_token(request):
+    if not BEARER_TOKEN:
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    expected_header = f"Bearer {BEARER_TOKEN}"
+    return auth_header == expected_header
+
+
 def run(cmd: str, timeout: int = 30) -> str:
-    """Run a shell command and return combined stdout/stderr."""
     try:
         r = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
@@ -96,36 +86,40 @@ def run(cmd: str, timeout: int = 30) -> str:
 
 
 def require_confirm(confirm: bool, action: str) -> Optional[str]:
-    """Return an error message if a dangerous action isn't confirmed."""
     if not confirm:
         return (
-            f"⚠️  DANGER: This action ({action}) is destructive.\n"
+            f"DANGER: This action ({action}) is destructive.\n"
             f"Set confirm=true to proceed."
         )
     return None
 
 
 def check_safe_path(path: str) -> bool:
-    """Check that a file path is within allowed prefixes."""
     abs_path = os.path.abspath(path)
     return any(abs_path == p.rstrip("/") or abs_path.startswith(p) for p in SAFE_FILE_PREFIXES)
 
 
-# ── MCP Server Instance ────────────────────────────────────────────
-mcp = FastMCP(
-    "jarvis-admin",
+class AuthenticatedFastMCP(FastMCP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+    async def handle_request(self, request, context):
+        if not validate_token(request):
+            return {"error": "Unauthorized - Invalid or missing Bearer token"}
+        return await super().handle_request(request, context)
+
+
+mcp = AuthenticatedFastMCP(
+    "service-terminal",
     host=HOST,
     port=PORT,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=["mcp.ralul.xyz", "localhost:*", "127.0.0.1:*"],
-        allowed_origins=["https://mcp.ralul.xyz"],
+        allowed_hosts=["localhost:*", "127.0.0.1:*"],
+        allowed_origins=["*"],
     ),
 )
 
-# ═══════════════════════════════════════════════════════════════════
-#  KUBERNETES / CLUSTER TOOLS
-# ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
 def k8s_pods(namespace: str = "", all_namespaces: bool = False) -> str:
@@ -323,10 +317,6 @@ def k8s_disable_addon(addon: str, confirm: bool = False) -> str:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  SYSTEM / HOST TOOLS
-# ═══════════════════════════════════════════════════════════════════
-
 @mcp.tool()
 def sys_info() -> str:
     """Get a full system overview: OS, kernel, CPU, memory, disk, uptime, load."""
@@ -504,10 +494,6 @@ def sys_apt_remove(package: str, confirm: bool = False) -> str:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  FILE TOOLS
-# ═══════════════════════════════════════════════════════════════════
-
 @mcp.tool()
 def file_read(path: str, max_lines: int = 200) -> str:
     """Read a file from the server. Path must be within allowed directories."""
@@ -534,11 +520,9 @@ def file_write(path: str, content: str, confirm: bool = False) -> str:
     if err:
         audit("file_write", path, err, "blocked")
         return err
-    # Ensure parent directory exists
     parent = os.path.dirname(path)
     if parent:
         run(f"sudo mkdir -p '{parent}'")
-    # Write via tee to handle permissions
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tmp", delete=False) as f:
         f.write(content)
@@ -575,13 +559,9 @@ def file_find(path: str, pattern: str, max_results: int = 30) -> str:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  META TOOLS
-# ═══════════════════════════════════════════════════════════════════
-
 @mcp.tool()
 def audit_log(lines: int = 30) -> str:
-    """Show recent entries from the MCP audit log."""
+    """Show recent entries from the audit log."""
     result = run(f"tail -{lines} {AUDIT_LOG} 2>&1")
     return result
 
@@ -603,11 +583,12 @@ def server_info() -> str:
         "audit_log", "server_info",
     ]
     result = (
-        f"Jarvis Admin MCP Server\n"
-        f"========================\n"
+        f"Service Terminal MCP Server\n"
+        f"============================\n"
         f"Host: {HOST}:{PORT}\n"
         f"Transport: SSE\n"
         f"Kubectl: {KUBECTL}\n"
+        f"Authentication: Bearer token (set SERVICE_TERMINAL_TOKEN env var)\n"
         f"Tools available: {len(tools)}\n\n"
         f"Cluster tools ({sum(1 for t in tools if t.startswith('k8s_'))}):\n"
         + "\n".join(f"  - {t}" for t in tools if t.startswith("k8s_"))
@@ -621,8 +602,10 @@ def server_info() -> str:
     return result
 
 
-# ── Run ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("Starting Jarvis Admin MCP Server on %s:%d (SSE transport)", HOST, PORT)
-    audit("server", "startup", f"MCP server started on {HOST}:{PORT}")
+    if BEARER_TOKEN:
+        logger.info("Starting Service Terminal MCP Server on %s:%d (SSE transport) with Bearer token authentication", HOST, PORT)
+    else:
+        logger.warning("Starting Service Terminal MCP Server on %s:%d (SSE transport) WITHOUT authentication - set SERVICE_TERMINAL_TOKEN env var", HOST, PORT)
+    audit("server", "startup", f"MCP server started on {HOST}:{PORT} with auth={'enabled' if BEARER_TOKEN else 'disabled'}")
     mcp.run(transport="sse")

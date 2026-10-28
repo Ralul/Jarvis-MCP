@@ -1,18 +1,2 @@
-# Sudoers configuration for the Jarvis MCP server
-# Allows the worker user to run specific commands without a password
-# so the MCP server can manage the system and cluster.
-#
-# Install: sudo cp jarvis-mcp.sudoers /etc/sudoers.d/jarvis-mcp && sudo chmod 440 /etc/sudoers.d/jarvis-mcp
-
-worker ALL=(ALL) NOPASSWD: /snap/bin/microk8s
-worker ALL=(ALL) NOPASSWD: /usr/bin/systemctl
-worker ALL=(ALL) NOPASSWD: /usr/bin/journalctl
-worker ALL=(ALL) NOPASSWD: /usr/bin/apt-get
-worker ALL=(ALL) NOPASSWD: /usr/sbin/reboot
-worker ALL=(ALL) NOPASSWD: /usr/sbin/shutdown
-worker ALL=(ALL) NOPASSWD: /snap/bin/snap
-worker ALL=(ALL) NOPASSWD: /usr/bin/tee
-worker ALL=(ALL) NOPASSWD: /usr/bin/cp
-worker ALL=(ALL) NOPASSWD: /usr/bin/mkdir
-worker ALL=(ALL) NOPASSWD: /usr/bin/chmod
-worker ALL=(ALL) NOPASSWD: /usr/sbin/usermod
+# DEPRECATED - Renamed to service-terminal.sudoers
+# This file has been replaced as part of the Service Terminal rename.

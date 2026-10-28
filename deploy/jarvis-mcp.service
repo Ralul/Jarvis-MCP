@@ -1,19 +1,2 @@
-[Unit]
-Description=Jarvis Admin MCP Server
-After=network.target snap.microk8s.daemon-kubelite.service
-Wants=snap.microk8s.daemon-kubelite.service
-
-[Service]
-Type=simple
-User=worker
-Group=worker
-WorkingDirectory=/opt/jarvis-mcp
-ExecStart=/opt/jarvis-mcp/venv/bin/python /opt/jarvis-mcp/server.py
-Restart=always
-RestartSec=5
-StandardOutput=append:/var/log/jarvis-mcp/server.log
-StandardError=append:/var/log/jarvis-mcp/server.log
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
+# DEPRECATED - Renamed to service-terminal.service
+# This file has been replaced as part of the Service Terminal rename.
